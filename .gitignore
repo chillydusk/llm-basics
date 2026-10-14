@@ -14,4 +14,5 @@ wheels/
 
 # 一次性实验脚本（本地跑，不进仓库）
 prompt_exp.py
+toolcall_demo.py
 study_prompt.v1.bak
