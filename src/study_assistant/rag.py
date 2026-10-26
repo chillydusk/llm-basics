@@ -16,10 +16,10 @@
        分词器把「无连接」切成「无 / 连接」，于是讲 UDP 的段子会命中「连接」。
        **这个修不了**，只能靠向量。它就是你 v2 的升级理由。
 
-跑法（Git Bash，项目根目录）：
+跑法（Git Bash）：
 
-    uv run python -m llm_basics.rag "三次握手的序列号怎么定"   ← 只测检索，不花钱
-    uv run python _demo_rag.py                                ← 看两个缺陷的实测数字
+    uv run study-assistant search "三次握手的序列号怎么定"   ← 只测检索，不花钱
+    uv run python _demo_rag.py                              ← 看两个缺陷的实测数字
 """
 
 from __future__ import annotations
@@ -169,9 +169,7 @@ def tokenize(text: str) -> tuple[str, ...]:
     """
     words = jieba.lcut(text)
     return tuple(
-        w.strip()
-        for w in words
-        if w.strip() and not _PUNCT.match(w) and w.lower() not in _STOP
+        w.strip() for w in words if w.strip() and not _PUNCT.match(w) and w.lower() not in _STOP
     )
 
 
@@ -271,9 +269,10 @@ def search(
     *,
     index: Index | None = None,
     scorer=bm25_score,
+    notes_dir: Path | None = None,
 ) -> list[Hit]:
     """给一个问题，返回最相关的 top_k 段。"""
-    index = index or get_index()
+    index = index or get_index(notes_dir)
     q_tokens = tokenize(query)
     if not q_tokens or not index.chunks:
         return []
@@ -294,42 +293,52 @@ def search(
 #  ⑤ 语料加载（带 mtime 缓存：笔记改了自动重建索引）
 # ══════════════════════════════════════════════════════════════════
 
-_INDEX: Index | None = None
-_SIG: tuple = ()
+_CACHE: dict[Path, tuple[tuple, Index]] = {}
 
 
-def _signature() -> tuple:
+def _resolve_dir(notes_dir: Path | None) -> Path:
+    """没传就用当前工作目录下的 notes/（命令行直接跑时方便）。"""
+    return (notes_dir or Path("notes")).resolve()
+
+
+def _signature(root: Path) -> tuple:
     """所有笔记的 (路径, 修改时间, 大小)。任何一个变了 → 重新建索引。"""
-    if not _NOTES_DIR.exists():
+    if not root.exists():
         return ()
     return tuple(
-        sorted((p.name, p.stat().st_mtime_ns, p.stat().st_size) for p in _NOTES_DIR.glob("*.md"))
+        sorted((p.name, p.stat().st_mtime_ns, p.stat().st_size) for p in root.glob("*.md"))
     )
 
 
-def load_chunks() -> list[Chunk]:
+def load_chunks(notes_dir: Path | None = None) -> list[Chunk]:
     """读 notes/*.md，切成段。"""
-    if not _NOTES_DIR.exists():
+    root = _resolve_dir(notes_dir)
+    if not root.exists():
         return []
     chunks: list[Chunk] = []
-    for path in sorted(_NOTES_DIR.glob("*.md")):
+    for path in sorted(root.glob("*.md")):
         text = path.read_text(encoding="utf-8")  # ⚠️ 必须 utf-8，否则 Windows 下按 GBK 乱码
         chunks.extend(chunk_text(text, source=path.name))
     return chunks
 
 
-def get_index() -> Index:
-    """拿索引；笔记变了就重建（几份笔记重建一次是毫秒级，不用怕）。"""
-    global _INDEX, _SIG
-    sig = _signature()
-    if _INDEX is None or sig != _SIG:
-        _INDEX = build_index(load_chunks())
-        _SIG = sig
-    return _INDEX
+def get_index(notes_dir: Path | None = None) -> Index:
+    """拿索引；笔记变了就重建（几份笔记重建一次是毫秒级，不用怕）。
+
+    按目录分别缓存 —— 因为同一个进程里可能既查默认的 notes/，
+    又被测试指向临时目录。
+    """
+    root = _resolve_dir(notes_dir)
+    sig = _signature(root)
+    cached = _CACHE.get(root)
+    if cached is None or cached[0] != sig:
+        cached = (sig, build_index(load_chunks(root)))
+        _CACHE[root] = cached
+    return cached[1]
 
 
-def index_stats() -> str:
-    idx = get_index()
+def index_stats(notes_dir: Path | None = None) -> str:
+    idx = get_index(notes_dir)
     return (
         f"索引：{idx.n} 段｜{len(idx.df)} 个不同的词｜平均 {idx.avg_len:.1f} 词/段"
         f"｜来源 {len({c.source for c in idx.chunks})} 份笔记"
@@ -363,14 +372,15 @@ def format_hits(query: str, hits: list[Hit], *, max_chars: int = 320) -> str:
     return "\n".join(lines)
 
 
-def cli(argv: list[str]) -> int:
+def cli(argv: list[str], notes_dir: Path | None = None) -> int:
+    """独立跑检索，不花 token。等价于 `study-assistant search "..."`。"""
     if not argv:
-        print("用法：uv run python -m llm_basics.rag \"你的问题\"")
+        print('用法：study-assistant search "你的问题"')
         return 2
     query = " ".join(argv)
-    print(index_stats())
+    print(index_stats(notes_dir))
     print()
-    print(format_hits(query, search(query)))
+    print(format_hits(query, search(query, notes_dir=notes_dir)))
     return 0
 
 

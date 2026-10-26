@@ -22,3 +22,9 @@ study_prompt.v1.bak
 .pytest_cache/
 .coverage
 htmlcov/
+
+# 运行产物
+logs/
+.coverage
+htmlcov/
+coverage.xml

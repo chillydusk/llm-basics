@@ -1,22 +1,32 @@
 [project]
-name = "llm-basics"
-version = "0.1.0"
-description = "手写 ReAct Agent 循环的 CLI 学习助手：工具调用 / 多轮对话 / 成本核算 / 关键词检索（含 LangChain 对照实现）"
+name = "study-assistant"
+version = "1.0.0"
+description = "不依赖 Agent 框架、从零手写的命令行学习助手：ReAct 循环 / 工具调用 / 关键词 RAG / MCP"
 readme = "README.md"
-authors = [
-    { name = "chillydusk", email = "mjh050728@163.com" }
-]
+authors = [{ name = "chillydusk", email = "mjh050728@163.com" }]
 requires-python = ">=3.13"
+license = { text = "MIT" }
+keywords = ["agent", "llm", "mcp", "rag", "tool-calling", "deepseek"]
+classifiers = [
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
 dependencies = [
-    "jieba",
+    "jieba>=0.42.1",
     "langchain>=1.4.7",
     "langchain-openai>=1.7.2",
     "openai>=3.19.2",
+    "pydantic>=2.0",
     "python-dotenv>=1.2.3",
 ]
 
 [project.scripts]
-llm-basics = "llm_basics:main"
+study-assistant = "study_assistant.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/chillydusk/study-assistant"
+Issues = "https://github.com/chillydusk/study-assistant/issues"
 
 [build-system]
 requires = ["uv_build>=0.12.14,<0.13.0"]
@@ -25,4 +35,24 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "ruff>=0.16.10",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# E501：中文注释按字符数算容易超长，交给格式化工具，不做硬性拦截
+# RUF001-003：全角标点告警 —— 中文项目里这些是正常写法，不是笔误
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::SyntaxWarning:jieba.*"]
+
+[tool.coverage.run]
+source = ["study_assistant"]

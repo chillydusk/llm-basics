@@ -4,25 +4,22 @@
 
     框架到底替你省了什么？又瞒着你扔了什么？
 
-对照物就是你自己写的 src/llm_basics/__init__.py（Part E/F）。
+对照物就是手写主线的 agent.py（Part E/F）。
 
 🟢 已写好：入口 main()、费用换算 print_usage()
 🔴 你要写：build_llm() / trim_lc() / get_response() / run_agent()
 
-跑法（Git Bash，项目根目录 D:/桌面/Agent开发/agents/study-assistant）：
+跑法（Git Bash，任意目录）：
 
-    uv add langchain-openai langchain          ← G.1，只做一次（约 1~3 分钟）
-    uv run python -m llm_basics.langchain_agent          ← 交互
-    uv run python -m llm_basics.langchain_agent "读一下 demo.md"
+    uv run python -m study_assistant.langchain_agent          ← 交互
+    uv run python -m study_assistant.langchain_agent "读一下 demo.md"
 
 ⚠️ 本文所有「实测」结论的版本：langchain 1.4.7 / langchain-openai / Python 3.13，
    实测日期 2026-10-26，模型 deepseek-flash。
 """
 
-import os
 import sys
 
-from dotenv import load_dotenv
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
@@ -31,11 +28,24 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_openai import ChatOpenAI
-from openai import OpenAIError
 
-from llm_basics import TOOL_MAP, TOOLS, estimate_cost, load_prompt
+from study_assistant.config import Settings
+from study_assistant.errors import StudyAssistantError
+from study_assistant.tools import ToolRegistry, builtin_tools, notes_tools
+from study_assistant.usage import Usage, estimate_cost
 
-load_dotenv(".env")  # llm_basics 里已经 load 过一次，这里显式再来一次，单独跑本文件也不炸
+SETTINGS = Settings.load()
+SETTINGS.ensure_ready()
+
+# 同一套工具：手写版用 ToolRegistry 分发，这里用同一份 schema 喂给 bind_tools
+REGISTRY = ToolRegistry()
+REGISTRY.extend(builtin_tools())
+REGISTRY.extend(notes_tools(SETTINGS.notes_dir))
+TOOLS = REGISTRY.schemas()
+
+
+def load_prompt() -> str:
+    return SETTINGS.prompt_path.read_text(encoding="utf-8")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -69,19 +79,15 @@ def build_llm():
     🎯 建议：主流程走 A —— 说明书写法两边一致，差异才只落在「循环 / 拼装」上，对比才公平。
         B 单独跑一次看 schema 变空，正好回答「框架自动生成 schema 省了什么、丢了什么」。
 
-    ── 验证（Git Bash，项目根目录）──
-        uv run python -c "from llm_basics.langchain_agent import build_llm; print(build_llm())"
+    ── 验证（Git Bash，任意目录）──
+        uv run python -c "from study_assistant.langchain_agent import build_llm; print(build_llm())"
         预期：打印出一个 ChatOpenAI(...) 对象，不报错
     """
     # 🔴 在这里写  ↓
-    API_KEY = os.getenv("DEEPSEEK_API_KEY")
-    if not API_KEY:
-        raise SystemExit("没找到 DEEPSEEK_API_KEY，检查 .env 文件")
-
     llm = ChatOpenAI(
-        model="deepseek-flash",
-        api_key=API_KEY,  # 从 .env 读，别写死
-        base_url="https://api.deepseek.com",
+        model=SETTINGS.model,
+        api_key=SETTINGS.api_key,  # 从配置层读，别写死
+        base_url=SETTINGS.base_url,
     )
 
     return llm.bind_tools(TOOLS)
@@ -95,7 +101,7 @@ def build_llm():
 def trim_lc(messages: list, keep: int = 20) -> list:
     """G-3 · 把 Part F 的 trim() 翻译成 LangChain 版。
 
-    为什么不能直接 from llm_basics import trim？
+    为什么不能直接复用 history.trim？
         因为 trim 里写的是 history[0]["role"]。
         LangChain 的消息是【对象】，取角色要用 .type，拿对象当下标 → TypeError。
 
@@ -117,8 +123,8 @@ def trim_lc(messages: list, keep: int = 20) -> list:
        消息对象化带来的是类型安全，代价是你自己的工具函数全得改一遍。
 
     ── 自检（Git Bash，项目根目录）──
-        uv run python _selftest_trim_lc.py
-        7 项全过才算对。它跟 _selftest_trim.py 是同构的，只把 dict 换成了消息对象。
+        uv run pytest tests/test_history.py -v
+        断言全过才算对。它跟手写版的截断测试是同构的，只把 dict 换成了消息对象。
     """
     # 🔴 在这里写  ↓
     if len(messages) <= keep:
@@ -179,7 +185,7 @@ def get_response(llm, messages: list, stream: bool = True) -> AIMessage:
            这是 Part G 最重要的一个发现，等下写进对比表。
 
     ── 验证 ──
-        uv run python -m llm_basics.langchain_agent "现在几点"
+        uv run python -m study_assistant.langchain_agent "现在几点"
     """
     # 🔴 在这里写  ↓
     if not stream:
@@ -233,7 +239,7 @@ def run_agent(llm, history: list, max_turns: int = 5, stream: bool = True) -> st
        否则你这里 append 的中间消息会污染 main() 里的 history。
 
     ── 验证 ──
-        uv run python -m llm_basics.langchain_agent "读一下 demo.md"
+        uv run python -m study_assistant.langchain_agent "读一下 demo.md"
         预期：工具被调用 → 答出 7319
     """
     # 🔴 在这里写  ↓
@@ -249,16 +255,12 @@ def run_agent(llm, history: list, max_turns: int = 5, stream: bool = True) -> st
         messages.append(resp)  # 先 append assistant 的回答
         for tc in resp.tool_calls:  # 再 append 各条 tool 调用
             print(f"\n  ⚙️  {tc['name']}({tc['args']})", flush=True)  # 🟢 展示用
-            tool_func = TOOL_MAP.get(tc["name"])
-            if tool_func is None:
-                # 不 raise：把错误当工具结果喂回去，让模型自己改
-                tool_result = f"没有这个工具：{tc['name']}"
-            else:
-                tool_result = tool_func(**tc["args"])
-            messages.append(
-                ToolMessage(content=tool_result, tool_call_id=tc["id"])
-            )
+            # 分发还是走同一个注册表：工具失败不中断（registry.call 永不抛异常）
+            tool_result = REGISTRY.call(tc["name"], tc["args"])
+            messages.append(ToolMessage(content=tool_result, tool_call_id=tc["id"]))
     return f"（超过最大轮数 {max_turns}，停手）"
+
+
 # ══════════════════════════════════════════════════════════════════
 #  🟢 以下是已写好的：费用换算 + 入口
 # ══════════════════════════════════════════════════════════════════
@@ -285,18 +287,13 @@ def print_usage(usage: dict | None, turn: int, finish_reason) -> None:
         print(f"\n[轮 {turn}] finish={finish_reason} | ⚠️ 没拿到 usage")
         return
 
-    from types import SimpleNamespace
-
     cache_read = (usage.get("input_token_details") or {}).get("cache_read", 0) or 0
-    shim = SimpleNamespace(
+    shim = Usage(
         prompt_cache_hit_tokens=cache_read,
         prompt_cache_miss_tokens=usage.get("input_tokens", 0) - cache_read,
         completion_tokens=usage.get("output_tokens", 0),
     )
-    print(
-        f"\n[轮 {turn}] finish={finish_reason}"
-        f" | 本轮花费 ≈ {estimate_cost(shim):.6f} 元"
-    )
+    print(f"\n[轮 {turn}] finish={finish_reason} | 本轮花费 ≈ {estimate_cost(shim):.6f} 元")
 
 
 def main() -> None:
@@ -309,9 +306,9 @@ def main() -> None:
         history.append(HumanMessage(content=question))
         try:
             run_agent(llm, history)
-        except OpenAIError as e:
+        except StudyAssistantError as e:
             print(f"\n调用失败：{e}")
-            raise SystemExit(1)
+            raise SystemExit(1) from None
         return
 
     print("输入 /exit 退出，/clear 清空对话\n")
@@ -336,10 +333,10 @@ def main() -> None:
             return
         except KeyboardInterrupt:
             print("\n退出（中断）")
-            raise SystemExit(130)
-        except OpenAIError as e:
+            raise SystemExit(130) from None
+        except StudyAssistantError as e:
             print(f"\n调用失败：{e}")
-            raise SystemExit(1)
+            raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

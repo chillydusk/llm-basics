@@ -17,9 +17,7 @@ from __future__ import annotations
 import re
 import sys
 
-sys.stdout.reconfigure(encoding="utf-8")
-
-from llm_basics.rag import (
+from study_assistant.rag import (
     Chunk,
     bm25_score,
     build_index,
@@ -30,6 +28,8 @@ from llm_basics.rag import (
     search,
     tokenize,
 )
+
+sys.stdout.reconfigure(encoding="utf-8")
 
 BAR = "═" * 78
 
@@ -56,10 +56,7 @@ def line(score: float, c) -> str:
 # ══════════════════════════════════════════════════════════════════
 
 # 短段：直接回答，四个关键词各出现 1 次，「序列号」2 次
-SHORT = (
-    "三次握手的序列号规则：客户端初始序列号 x 随机，服务端 y 随机，"
-    "确认号是对方的序列号加一。"
-)
+SHORT = "三次握手的序列号规则：客户端初始序列号 x 随机，服务端 y 随机，确认号是对方的序列号加一。"
 
 # 长段：同样的四个词各出现 1 次，但「序列号」多出现 2 次 ——
 # 不是因为它更相关，只是因为它更长、绕得多。这就是长度偏置的全部秘密。
@@ -111,9 +108,9 @@ def controlled_experiment() -> None:
 
     print("  对照（只看前两名）：")
     for name in ("原式", "BM25"):
-        s, l = got[name]["短段"], got[name]["长段"]
-        verdict = "长段赢 ← 错" if l > s else "短段赢 ← 对"
-        print(f"    {name:<5} 短段 {s:5.2f}｜长段 {l:5.2f}　→ {verdict}")
+        short_score, long_score = got[name]["短段"], got[name]["长段"]
+        verdict = "长段赢 ← 错" if long_score > short_score else "短段赢 ← 对"
+        print(f"    {name:<5} 短段 {short_score:5.2f}｜长段 {long_score:5.2f}　→ {verdict}")
     print(
         "\n  🎯 结论：原式里「出现次数」是唯一信号 → 谁长谁的次数就多 → 谁赢。\n"
         "     BM25 用 tf 饱和（重复到一定程度不再加分）+ 长度惩罚，把长段按了回去。"
@@ -143,9 +140,7 @@ def real_corpus() -> None:
         for s, c in b_hits[:3]:
             print(line(s, c))
         if n_hits[0][1].cite != b_hits[0][1].cite:
-            print(
-                f"  🎯 第一名变了：原式「{n_hits[0][1].cite}」→ BM25「{b_hits[0][1].cite}」"
-            )
+            print(f"  🎯 第一名变了：原式「{n_hits[0][1].cite}」→ BM25「{b_hits[0][1].cite}」")
 
     lens = [len(c.tokens) for c in idx.chunks]
     print(
@@ -200,7 +195,9 @@ def profile() -> None:
         print(f"  {w:<8} 出现在 {df:2d} / {idx.n} 段　idf={idf(w, idx):.2f}")
 
     print("\n出现在最多段里的词（idf 低 = 区分度低）：")
-    common = sorted(((df, w) for w, df in idx.df.items() if re.search(r"[一-鿿]{2,}", w)), reverse=True)[:6]
+    common = sorted(
+        ((df, w) for w, df in idx.df.items() if re.search(r"[一-鿿]{2,}", w)), reverse=True
+    )[:6]
     for df, w in common:
         print(f"  {w:<8} 出现在 {df:2d} / {idx.n} 段　idf={idf(w, idx):.2f}")
 

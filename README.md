@@ -1,7 +1,7 @@
 # study-assistant
 
 > 一个**不依赖 Agent 框架**、从零手写的命令行学习助手。
-> 会调工具、会查笔记、答案标注出处、每一轮都告诉你花了多少钱。
+> 手写 ReAct 循环 · 工具调用 · 关键词 RAG · **自带 MCP 客户端与服务器**
 
 ![终端实录（节选）](docs/demo.svg)
 
@@ -11,22 +11,86 @@
 
 ## 这是什么
 
-一个跑在终端里的 AI 学习助手，人设是「计算机学习导师」。
+一个跑在终端里的 AI 学习助手，人设是「计算机学习导师」——
+它会反问你思路、查你的笔记、给答案标注出处、每一轮都告诉你花了多少钱。
 
 它的特别之处不在于功能多，而在于**每一层都是自己写的**：
 
 | 能力 | 实现方式 |
 |---|---|
-| Agent 循环 | 手写 ReAct 风格：流式累积工具调用 → 执行 → 回填 → 继续推理 |
-| 工具调用 | 4 个工具，自己定义 schema、自己分发、失败不中断 |
-| 上下文管理 | 自己实现截断，保住 system 人设、丢掉孤儿 tool 消息 |
-| 成本核算 | 流式 usage → 缓存命中/未命中分开计价 → 元，精确到小数点后 6 位 |
-| 检索增强 | 自建关键词基线：切分 + jieba 分词 + BM25 打分 + 引用 |
-| 框架对照 | 同一套工具用 LangChain 再实现一遍，量化「框架省了什么、瞒了什么」 |
+| Agent 循环 | 手写 ReAct：流式累积工具分片 → 执行 → 回填 → 继续推理 |
+| 工具系统 | 统一注册表，schema + 函数配对，**分发永不抛异常** |
+| MCP | **手写 JSON-RPC over stdio 客户端**，同时自带一个 MCP 服务器 |
+| 检索增强 | 切分 + jieba 分词 + BM25 打分 + 引用，缺陷有量化 |
+| 上下文管理 | 自己实现截断，保住 system、丢掉孤儿 tool 消息 |
+| 成本核算 | 缓存命中/未命中分开计价，精确到 0.000001 元 |
 
 **这不是什么**：不是 RAG 教程、不是 LangChain 封装、不是聊天玩具。
 它的价值在于**可解释** —— 你能看到模型每一步在想什么、调了什么工具、花了多少钱，
 也能看到每个设计选择的代价。
+
+---
+
+## 三个不常见的地方
+
+### 1. Agent 循环是手写的，没有 `create_agent`
+
+`agent.py` 里那个 `for turn in range(max_turns)` 就是全部。流式分片怎么攒、
+assistant 消息怎么回填、孤儿 tool 消息怎么处理 —— 每一行都能讲。
+
+### 2. MCP 客户端也是手写的，没装 SDK
+
+MCP 的 stdio 传输协议本体只有四个方法：`initialize` / `notifications/initialized` /
+`tools/list` / `tools/call`，一行一条 JSON，走 stdin/stdout。
+
+`mcp_client.py` 对着协议实现了它，`mcp_server.py` 实现了另一端。
+**两端加起来不到 500 行，但能把「工具」从进程内的函数变成可跨进程分发的服务。**
+
+> 为什么不用官方 `mcp` SDK：它的客户端是 async 的，而本项目的循环是同步的，
+> 中间要架一层事件循环线程。协议本体很小，手写反而更清楚、更好调试。
+> 要接公司现成的 MCP 生态，把 `MCPClient` 换成官方 SDK 即可，接口是一样的。
+
+### 3. 检索基线的缺陷有量化，不是「效果不错」
+
+长度偏置和语义盲区都能一条命令复现，数字见[实测数据](#实测数据)。
+
+---
+
+## 架构
+
+```
+                      ┌───────────┐
+   你 > 问题 ──────────►│  cli.py   │  chat / ask / search / tools / doctor
+                      └─────┬─────┘
+                            ▼
+                      ┌───────────┐
+                      │ agent.py  │ ◄─── 工具结果回填，回到循环开头
+                      └─────┬─────┘
+                            │ 1. 流式请求（截断历史 → 拼工具 schema）
+                            ▼
+                      ┌───────────┐
+                      │ DeepSeek  │  deepseek-flash · 流式 · usage 实时计价
+                      └─────┬─────┘
+                            │ 2. finish_reason == tool_calls ?
+                            ▼
+                      ┌───────────┐
+                      │ registry  │  统一分发（永不抛异常）
+                      └─────┬─────┘
+                            │ 3. 执行 + 把结果包成 tool 消息
+          ┌─────────────────┼─────────────────┐
+          ▼                 ▼                 ▼
+    ┌───────────┐     ┌───────────┐     ┌───────────┐
+    │  builtin  │     │   notes   │     │    MCP    │
+    └───────────┘     └───────────┘     └─────┬─────┘
+    get_time          read_notes              │ JSON-RPC
+    calculate         list_notes              ▼
+                      search_notes      ┌───────────┐   ← 独立进程
+                                        │ MCP server│
+                                        └───────────┘
+```
+
+**关键点**：模型只负责「决定调哪个工具、传什么参数」，**执行永远在我的代码里**。
+它在云端，没有我的时钟、没有我的文件 —— 这是 Tool Calling 的第一性原理。
 
 ---
 
@@ -35,153 +99,96 @@
 **前置**：Python 3.13+、[uv](https://docs.astral.sh/uv/)
 
 ```bash
-# 1. 拿代码
 git clone https://github.com/chillydusk/study-assistant.git
 cd study-assistant
 
-# 2. 配置 key（去 https://platform.deepseek.com/ 申请）
-cp .env.example .env
-#    然后编辑 .env，把 sk-xxxx 换成你自己的
-
-# 3. 装依赖
+cp .env.example .env          # 然后编辑 .env，填入 DeepSeek key（platform.deepseek.com）
 uv sync
 
-# 4. 跑
-uv run python -m llm_basics "三次握手的序列号是怎么定的？"
+uv run study-assistant doctor        # 环境自检
+uv run study-assistant ask "三次握手的序列号是怎么定的？"
 ```
 
-> ⚠️ **必须在本项目根目录运行。**
-> `.env`、`study_prompt.txt`、`notes/` 三个路径都是相对当前目录找的 ——
-> 在别的目录下跑会直接报「没找到 study_prompt.txt」。这是已知设计债，见[已知限制](#已知限制)。
+> 💡 **国内网络**：`uv sync` 如果卡住，是 `files.pythonhosted.org` 被限速。
+> 用镜像：`UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple uv sync`
+> （只在当前命令生效，不会改你的全局配置）
 
-### 交互模式
+### 命令行
 
-```bash
-uv run python -m llm_basics
-```
-
-```
-输入 /exit 退出，/clear 清空对话
-
-你 > 帮我看看现在几点，再算一下 12345 + 67890
-      ⚙️  get_time({})
-      ⚙️  calculate({"a": 12345, "b": 67890})
-      ...
-你 > /clear
-会话已清空，只保留人设。
-```
-
-- `/exit` 或 `/quit` 退出（退出码 0）
-- `/clear` 清空对话，只保留人设
-- `Ctrl+D` 干净退出，`Ctrl+C` 退出码 130，都不会甩一屏 traceback
-
-### 单独测检索（不花 token）
-
-```bash
-uv run python -m llm_basics.rag "三次握手的序列号怎么定"
-uv run python _demo_rag.py          # 看关键词检索的两个缺陷实测
-```
-
----
-
-## 架构
-
-```
-                      ┌───────────┐
-   你 > 问题 ────────►│  main()   │  REPL / 单问 / /clear / 退出码
-                      └─────┬─────┘
-                            │  history: list[dict]，每轮整段传下去
-                            ▼
-                      ┌───────────┐
-                      │  trim()   │  超 20 条就丢最早的；保 system；清孤儿 tool
-                      └─────┬─────┘
-                            ▼
-                     ╔═════════════╗
-                     ║ run_agent() ║ ◄──── 工具结果回填后回到循环开头
-                     ╚══════╤══════╝
-                            │ 1. 流式请求
-                            ▼
-                      ┌───────────┐
-                      │ DeepSeek  │
-                      └─────┬─────┘
-                            │ 2. finish_reason
-                    ┌───────┴───────┐
-               tool_calls         stop
-                    │               │
-                    ▼               ▼
-              ┌───────────┐   ┌───────────┐
-              │  TOOL_MAP │   │  answer   │
-              └─────┬─────┘   └───────────┘
-                    │ 3. 执行工具，结果包成 tool 消息
-                    │
-                    ├── get_time       当前时间（北京时间 UTC+8）
-                    ├── calculate      两数相加
-                    ├── read_notes     读整份笔记
-                    └── search_notes   检索笔记（带引用）
-                              │
-                              ▼
-                        ┌───────────┐
-                        │  rag.py   │  notes/*.md
-                        └───────────┘
-                        切段 → jieba → BM25 → Top-K → 带引用
-```
-
-**关键点**：模型只负责「决定调哪个工具、传什么参数」，**执行永远在我的代码里**。
-它在云端，没有我的时钟、没有我的文件 —— 这是 Tool Calling 的第一性原理。
-
----
-
-## 技术要点
-
-### 1. 流式工具调用：分片要自己拼
-
-流式下 `tool_calls` 是**碎片**：第一片带 `id` 和 `name`，之后几十片是 `arguments`
-的逐字符分片。按 `index` 分槽累积，**第一片先到先得，arguments 永远拼接**。
-攒完才能 `json.loads` —— 把半截 JSON 塞回 API 会直接 400。
-
-### 2. 上下文截断：三条不能破的线
-
-- 第一条 system（人设）永远留住
-- 不是原 list 的引用，而是新 list（否则 `append` 会污染会话状态）
-- 开头若是孤儿 `tool` 消息就丢掉（它的配对 assistant 已被裁掉 → API 400）
-
-仓库里有两个可执行的自检脚本，共 14 项不变量断言：
-`_selftest_trim.py`（手写版）、`_selftest_trim_lc.py`（LangChain 版）。
-
-### 3. 成本：缓存命中要分开算
-
-DeepSeek 的 usage 里，输入分成 `prompt_cache_hit_tokens` 和
-`prompt_cache_miss_tokens` 两笔，单价差 50 倍。直接拿 `prompt_tokens` 乘单价会算错。
-本项目按命中/未命中分别计价，再判断峰谷时段（高峰 ×2）。
-
-### 4. 检索：先立基线，再谈升级
-
-DeepSeek **没有 embedding 接口**（实测 404），所以 v1 走关键词：
-
-```
-score = Σ 词频 × log(总段数 / 含该词的段数)      ← 朴素版
-      ↓ 加上词频饱和 + 长度归一化
-score = Σ idf × tf·(k1+1) / (tf + k1·(1-b+b·|d|/avgdl))   ← BM25
-```
-
-两个缺陷都做了**可复现的量化**（`uv run python _demo_rag.py`）：
-
-| 缺陷 | 实测 |
+| 命令 | 作用 |
 |---|---|
-| 长度偏置 | 控制实验：朴素版 长段 9.89 > 短段 6.59（**错**）；BM25 短段 5.57 > 长段 3.42（**对**） |
-| 不懂语义 | 查「建立连接」→ 讲「**无连接**」的 UDP 段以 5.42 排第一。调参救不了，只能上 embedding |
+| `study-assistant chat` | 交互模式（默认）；`/clear` `/tools` `/cost` `/exit` |
+| `study-assistant ask "问题"` | 单问一次 |
+| `study-assistant search "查询"` | **只测检索，不花 token** |
+| `study-assistant tools` | 列出当前注册的所有工具（含 MCP） |
+| `study-assistant mcp list` | 看 MCP 服务器状态与工具清单 |
+| `study-assistant mcp serve` | 把自己当 MCP 服务器启动 |
+| `study-assistant doctor [--online]` | 环境自检（`--online` 会做一次真实调用） |
 
-> 面试金句：我的关键词基线有个已知缺陷 ——「无连接」会匹配到「连接」。
-> 我能量化它，这就是我下一步要上向量检索的原因。
+退出码：`0` 正常 / `1` 模型错误 / `2` 配置错误 / `130` Ctrl+C。
 
-### 5. 工具是工具，不是流程
+---
 
-检索**做成了工具**而不是「提问前先查一遍」。
+## MCP：把工具变成进程
 
-- 塞进主流程：问「现在几点」也要翻一遍笔记，白花 token，还容易被笔记内容带偏
-- 做成工具：模型自己决定要不要查。问时间就调 `get_time`，问笔记才调 `search_notes`
+### 它解决什么问题
 
-决策权在模型，执行权在代码。
+没有 MCP 时，给 Agent 加一个能力 = 往 `tools.py` 里加一个函数，然后重新部署。
+有 MCP 后，那个能力可以是**别人仓库里的一个进程**，你只写四行配置。
+
+本项目的做法更彻底一点：**笔记工具默认就跑在 MCP 服务器进程里**。
+主程序不再 import `read_notes`，而是启动子进程、握手、`tools/list`、
+把拿到的 16 个 schema 当成普通工具挂进注册表。
+
+### 怎么配
+
+`mcp_servers.json`（字段沿用 Claude Desktop 的约定）：
+
+```json
+{
+  "mcpServers": {
+    "notes": {
+      "command": "{python}",
+      "args": ["-m", "study_assistant.mcp_server"],
+      "enabled": true
+    }
+  }
+}
+```
+
+`{python}` 会展开成当前解释器。加一个第三方服务器，就是再加一段：
+
+```json
+{
+  "command": "npx",
+  "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
+}
+```
+
+起不来的服务器**不会阻断启动** —— 会降级、记日志、在 `study-assistant mcp list` 里标红。
+
+### 怎么验证
+
+```bash
+uv run study-assistant tools        # notes 工具的 source 应该显示 mcp:notes
+uv run study-assistant mcp list     # 服务器版本 + 工具清单
+uv run pytest tests/test_mcp.py -v  # 协议两端都有测试
+```
+
+---
+
+## 工程化
+
+| 关注点 | 做法 | 代码 |
+|---|---|---|
+| **配置** | 单一 `Settings`，启动即校验；**路径全部锚定项目根**，在哪个目录跑都一样 | `config.py` |
+| **日志** | 控制台只放 WARNING+，文件记 DEBUG+ 并轮转（2 MB × 3） | `logging_setup.py` |
+| **异常** | `StudyAssistantError` 分四类；上层只认自家异常，不认 SDK | `errors.py` |
+| **重试** | 只在「还没吐任何内容」时重试，避免用户看到两份答案 | `llm.py` |
+| **安全** | 笔记路径 `resolve()` 后做包含检查，`../../.env` 读不到 | `tools.py` |
+| **可观测** | 每轮打印 finish_reason / 命中 / 输入 / 输出 / 花费；会话结束给总额 | `agent.py` |
+| **测试** | 67 个用例，假 LLM 跑通整条循环，MCP 两端都覆盖 | `tests/` |
+| **CI** | GitHub Actions：ruff + ruff format + pytest（Ubuntu & Windows） | `.github/workflows/ci.yml` |
 
 ---
 
@@ -189,20 +196,28 @@ score = Σ idf × tf·(k1+1) / (tf + k1·(1-b+b·|d|/avgdl))   ← BM25
 
 ```
 study-assistant/
-├── src/llm_basics/
-│   ├── __init__.py          手写 Agent 主程序：工具层 + 循环 + REPL
-│   ├── rag.py              最小 RAG：切分 / 分词 / BM25 / 引用格式
-│   ├── langchain_agent.py  LangChain 对照实现（同一套工具、同一个人设）
-│   └── __main__.py         让 `python -m llm_basics` 能跑
-├── notes/                  笔记语料（检索对象）
+├── src/study_assistant/
+│   ├── cli.py           命令行入口（argparse 子命令）
+│   ├── config.py        配置 + 校验 + 路径锚定
+│   ├── agent.py         ⭐ 手写 ReAct 循环
+│   ├── tools.py         工具注册表 + 内置工具 + 笔记工具
+│   ├── rag.py           切分 / jieba / BM25 / 引用
+│   ├── mcp_client.py    ⭐ 手写 MCP 客户端（JSON-RPC over stdio）
+│   ├── mcp_server.py    ⭐ 自带 MCP 服务器（暴露 notes/）
+│   ├── llm.py           模型客户端（流式 / 重试）
+│   ├── usage.py         token 计费
+│   ├── history.py       会话截断
+│   ├── logging_setup.py 日志
+│   ├── errors.py        异常层级
+│   └── langchain_agent.py  LangChain 对照实现
+├── tests/               67 个用例
+├── notes/               笔记语料（检索对象）
 ├── docs/
-│   ├── 手写-vs-LangChain.md 两套实现的对比表（含实测数据）
-│   └── demo.svg            终端实录
-├── _selftest_trim.py       截断逻辑自检（7 项）
-├── _selftest_trim_lc.py    LangChain 版截断自检（7 项）
-├── _demo_rag.py            关键词检索两个缺陷的实测脚本
-├── study_prompt.txt        人设
-└── .env.example            配置模板（真 key 在 .env，已被 gitignore）
+│   ├── 手写-vs-LangChain.md   两套实现的对比表（含实测数据）
+│   ├── demo.svg              终端实录
+│   └── 录屏说明.md            换成 GIF 的步骤
+├── mcp_servers.json     MCP 配置
+└── _demo_rag.py         检索两个缺陷的实测脚本
 ```
 
 ---
@@ -211,13 +226,22 @@ study-assistant/
 
 | 项 | 数值 |
 |---|---|
-| 依赖包 | 纯手写 **18** 个 → 引入 LangChain 后 **48** 个（+30，其中 langgraph / langsmith / tiktoken 一个都没直接用） |
+| 依赖包 | 纯手写 18 个 → 引入 LangChain 后 48 个（+30） |
 | Agent 循环代码 | 手写 74 行 → LangChain 18 行 + 适配层 31 行（净省 1/3，不是 4 倍） |
-| 一次两轮问答成本 | ≈ 0.003 元（deepseek-flash，含两次检索） |
 | 检索语料 | 16 段 / 4 份笔记 / 427 个词项 |
-| 流式分片 | 一句「读一下 demo.md」收到 11 个 tool_call 分片 |
+| **长度偏置** | 原式 长段 **9.89** > 短段 6.59（错）→ BM25 短段 **5.57** > 长段 3.42（对） |
+| **语义盲区** | 查「建立连接」→ 讲「**无连接**」的 UDP 段 **5.42 分排第一**，调参救不了 |
+| MCP 通信 | 3 个工具跨进程调用，单次往返 < 5 ms |
+| 一次两轮问答 | ≈ 0.004 元（deepseek-flash，含两次检索） |
+| 测试 | 67 passed，覆盖率 55% |
 
-完整对比见 [docs/手写-vs-LangChain.md](docs/手写-vs-LangChain.md)，那里有 13 行主表和三个面试结论。
+复现两个缺陷：
+
+```bash
+uv run python _demo_rag.py
+```
+
+完整的手写/框架对比见 [docs/手写-vs-LangChain.md](docs/手写-vs-LangChain.md)。
 
 ---
 
@@ -225,14 +249,13 @@ study-assistant/
 
 写在这里，是因为**知道自己系统的边界比功能列表更能说明水平**。
 
-1. **关键词检索不懂语义**。「无连接」会命中「连接」，否定、同义词、缩写全部抓不到。
-   量化结果见上方表格。下一步：接 embedding（DeepSeek 不提供，需换供应商或本地模型）。
-2. **`read_notes` 没有路径校验**。传 `../../.env` 能读到密钥。
-   应该在读之前 `resolve()` 并检查是否还在 `notes/` 目录内。
-3. **三个路径依赖当前工作目录**（`.env` / `study_prompt.txt` / `notes/`），
-   必须在项目根目录运行。正确做法是全部基于 `Path(__file__)` 定位。
-4. **无持久化**。关掉终端对话就没了，没有 checkpointer / 数据库。
-5. **单用户单会话**。没有并发，没有鉴权 —— 它本来就是个本地 CLI 工具。
+1. **关键词检索不懂语义**。「无连接」会命中「连接」，否定、同义词、缩写全抓不到。
+   量化见上表。下一步：接 embedding（DeepSeek 不提供，需换供应商或本地模型）。
+2. **MCP 只实现了 stdio 传输**。HTTP/SSE 传输、resources、prompts、sampling 都没做，
+   只覆盖了 tools 这一类能力。
+3. **没有持久化**。关掉终端对话就没了，没有 checkpointer / 数据库。
+4. **单用户单会话**。没有并发、没有鉴权 —— 它本来就是个本地 CLI 工具。
+5. **检索索引每次启动重建**（毫秒级）。语料上千段时需要落盘 + 增量更新。
 
 ---
 
@@ -242,11 +265,19 @@ study-assistant/
 - [x] 成本核算与人设加载
 - [x] 关键词检索基线 + 引用
 - [x] LangChain 对照实现与量化对比
+- [x] **MCP 客户端 + 服务器（stdio）**
+- [x] **工程化：配置 / 日志 / 异常 / 安全 / 测试 / CI**
 - [ ] 向量检索（找一家有 embedding 的供应商，量出相对基线的提升）
-- [ ] 路径安全（`read_notes` 路径穿越）
 - [ ] 会话持久化
+- [ ] MCP HTTP 传输与 resources 支持
 
 ---
+
+## 参考
+
+- 工程结构与 MCP 集成的思路参考了 [Hello-Agents 第十三章 · 智能旅行助手](https://hello-agents.datawhale.cc/#/./chapter13/第十三章%20智能旅行助手)
+  （多智能体协作 + MCP 工具集成）。本项目**没有**照搬它的 Web 前后端与四 Agent 编排 ——
+  一个本地 CLI 不需要 Vue，也不需要为一个工具链拆出四个 Agent。取的是它的工程分层与 MCP 用法。
 
 ## License
 

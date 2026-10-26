@@ -1,0 +1,11 @@
+{
+  "$comment": "MCP 服务器配置。字段沿用 Claude Desktop 的 mcpServers 约定；{python} 会展开成当前解释器。",
+  "mcpServers": {
+    "notes": {
+      "command": "{python}",
+      "args": ["-m", "study_assistant.mcp_server"],
+      "enabled": true,
+      "description": "把 notes/ 目录暴露成 MCP 工具（本项目自带，零配置可用）"
+    }
+  }
+}
