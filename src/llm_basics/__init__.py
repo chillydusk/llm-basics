@@ -23,6 +23,8 @@ from openai import OpenAI, OpenAIError
 DIM = "\033[2m"  # 变暗（思考区开）
 RESET = "\033[0m"  # 恢复默认（思考区关）
 
+TRACE_TOOLS = True  # 打印每次工具调用（演示用；不想要就改 False）
+
 # 北京时间固定 UTC+8（中国不实行夏令时，所以用固定偏移就够，不必装 tzdata）
 BEIJING = timezone(timedelta(hours=8))
 
@@ -82,7 +84,7 @@ def estimate_cost(usage) -> float:
 #  工具层（从 toolcall_demo.py 搬过来，🟢 已写好）
 # ══════════════════════════════════════════════════════════════════
 
-# —— ① 工具说明书：告诉模型"世界上有这三个工具" ——
+# —— ① 工具说明书：告诉模型"世界上有这四个工具" ——
 TOOLS = [
     {
         "type": "function",
@@ -127,6 +129,32 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_notes",
+            "description": (
+                "在我的全部学习笔记里做关键词检索，返回最相关的几段，每段带"
+                "《文件名》· 小节名 的来源标签。"
+                "不知道答案在哪份笔记里时用它；已经知道文件名、想看全文时用 read_notes。"
+                "回答用户时请注明引用的来源。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "检索关键词，中文直接用，如「三次握手 序列号」",
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "返回几段，默认 3，最多 6",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 
@@ -150,11 +178,31 @@ def read_notes(filename: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def search_notes(query: str, top_k: int = 3) -> str:
+    """Part H · 检索笔记：返回最相关的几段，带《文件》· 小节 引用标签。
+
+    它是「工具」而不是「主流程里先查一遍」——**这一步很关键**：
+
+        塞进主流程：每次提问都先检索 → 用户问「现在几点」也要翻一遍笔记（浪费 token、
+                    而且模型被迫从笔记里找答案，容易答非所问）
+        做成工具：  模型自己判断要不要查。问时间就调 get_time，问笔记才调它。
+
+    这就是 ReAct 里 "Act" 的意义：**决策权在模型，执行权在你。**
+
+    实现本身只有一行 —— 活儿在 llm_basics/rag.py 里（切分 / 分词 / BM25）。
+    """
+    from llm_basics.rag import format_hits, search
+
+    hits = search(query, top_k=max(1, min(int(top_k), 6)))
+    return format_hits(query, hits)
+
+
 # —— ③ 分发表：名字 → 函数。模型给名字，我们查表 ——
 TOOL_MAP = {
     "get_time": get_time,
     "calculate": calculate,
     "read_notes": read_notes,
+    "search_notes": search_notes,
 }
 
 
@@ -353,6 +401,8 @@ def run_agent(history: list[dict], max_turns: int = 5) -> str:
         # ───────────────────────────────────────────────────────────
         for slot in tool_acc.values():
             func = TOOL_MAP[slot["name"]]
+            if TRACE_TOOLS:  # 🟢 展示用：让用户看见"模型到底调了什么工具"
+                print(f"\n  ⚙️  {slot['name']}({slot['arguments']})", flush=True)
             args = json.loads(slot["arguments"])
             result = func(**args)
             messages.append(

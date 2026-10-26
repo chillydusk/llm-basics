@@ -1,13 +1,14 @@
 [project]
 name = "llm-basics"
 version = "0.1.0"
-description = "Add your description here"
+description = "手写 ReAct Agent 循环的 CLI 学习助手：工具调用 / 多轮对话 / 成本核算 / 关键词检索（含 LangChain 对照实现）"
 readme = "README.md"
 authors = [
     { name = "chillydusk", email = "mjh050728@163.com" }
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "jieba",
     "langchain>=1.4.7",
     "langchain-openai>=1.7.2",
     "openai>=3.19.2",

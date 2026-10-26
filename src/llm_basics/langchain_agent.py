@@ -248,6 +248,7 @@ def run_agent(llm, history: list, max_turns: int = 5, stream: bool = True) -> st
 
         messages.append(resp)  # 先 append assistant 的回答
         for tc in resp.tool_calls:  # 再 append 各条 tool 调用
+            print(f"\n  ⚙️  {tc['name']}({tc['args']})", flush=True)  # 🟢 展示用
             tool_func = TOOL_MAP.get(tc["name"])
             if tool_func is None:
                 # 不 raise：把错误当工具结果喂回去，让模型自己改

@@ -16,3 +16,9 @@ wheels/
 prompt_exp.py
 toolcall_demo.py
 study_prompt.v1.bak
+
+# 工具缓存
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
