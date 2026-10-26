@@ -1,20 +1,24 @@
-"""study-assistant · Part E：手写 Agent 循环。
+"""study-assistant · Part F：缝合 v0（人设 + 多轮 + 输入管道）。
 
-从「单轮工具助手」升级成「会自己转圈的 Agent」：
+E 结束时它已经会自己转圈了，但只会回答一个写死的问题。F 把它变成真能用的 CLI：
 
-    问一次 → 模型说要工具 → 执行 → 回填 → 再问 → …… → 模型说不用了（stop）→ 收工
+    人设    study_prompt.txt → history[0] 的 system 消息
+    多轮    history 活在 run_agent 外面，每次整段传进去
+    截断    trim() 挡住上下文无限增长
+    入口    REPL / 单问 / /exit / /clear / 退出码
 
-🟢 已写好的：环境/定价/工具说明书/三个工具本体/分发表/流式显示
-🔴 要你写的：run_agent() 里三处标了「填空」的地方
+🟢 已写好的：环境/定价/工具/Agent 循环主体/流式显示
+🔴 要你写的：下面「Part F 动工区」两个函数 + run_agent 两行 + main() 整段
 """
 
 import json
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import OpenAI, OpenAIError
 
 DIM = "\033[2m"  # 变暗（思考区开）
 RESET = "\033[0m"  # 恢复默认（思考区关）
@@ -107,11 +111,17 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "read_notes",
-            "description": "读取我的学习笔记文件",
+            "description": (
+                "读取我的学习笔记文件。filename 只传文件名（如 demo.md），"
+                "不要带 notes/ 前缀 —— 工具内部会自动到 notes/ 目录下找。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "filename": {"type": "string", "description": "笔记文件名"},
+                    "filename": {
+                        "type": "string",
+                        "description": "笔记文件名，如 demo.md（不要带 notes/ 前缀）",
+                    },
                 },
                 "required": ["filename"],
             },
@@ -132,7 +142,9 @@ def calculate(a: float, b: float) -> str:
 def read_notes(filename: str) -> str:
     # ⚠️ 已知缺口：这里没做路径校验，传 "../../.env" 能读到秘密。
     #    W8 会专门修这个（路径穿越）。
-    path = Path("notes") / filename
+    # 容错：模型常把整条相对路径传进来（notes/demo.md），先归一化再剥前缀。
+    name = filename.replace("\\", "/").removeprefix("./").removeprefix("notes/")
+    path = Path("notes") / name
     if not path.exists():
         return f"找不到文件：{filename}"
     return path.read_text(encoding="utf-8")
@@ -147,14 +159,86 @@ TOOL_MAP = {
 
 
 # ══════════════════════════════════════════════════════════════════
-#  Agent 循环 —— 🔴 这一整块是你要写的
+#  Part F · 动工区（🔴 你写 —— 这里只有提示，没有逻辑）
 # ══════════════════════════════════════════════════════════════════
 
 
-def run_agent(question: str, max_turns: int = 5) -> str:
-    """反复问模型，直到它不再要工具为止。返回它最后说的那段话。"""
-    messages = [{"role": "user", "content": question}]
+def load_prompt() -> str:
+    """F-1 · 读人设文件，返回纯文本。
 
+    三行就够，但两个地方得先想清楚：
+
+      ① 读文件必须显式 encoding="utf-8"
+         —— Windows 上 read_text() 不给参数会按 GBK 解码，中文人设直接乱码。
+
+      ② 文件万一不在了怎么办？
+         —— 看上面处理 API_KEY 的那几行（raise SystemExit + 中文提示）。
+            静默失败是最糟的：人设为空 → 助手退回通用腔 → 你还以为是 prompt 写坏了。
+    """
+    if Path("study_prompt.txt").exists() is False:
+        raise SystemExit("没找到 study_prompt.txt，检查文件是否存在")
+    return Path("study_prompt.txt").read_text(encoding="utf-8")
+
+
+def trim(history: list[dict], keep: int = 20) -> list[dict]:
+    """F-4 · 截断会话历史，保住三条底线。
+
+    先想清楚三种情况，代码自然就出来了：
+
+      ① 没超 keep
+         —— 原样返回。但要问自己：返回【拷贝】还是【就是这个 list】？
+            返回本身的话，run_agent 里的 messages.append 会写进会话状态。
+
+      ② 超了
+         —— 丢最早的，但 history[0]（system 人设）必须留着。
+            提示：Python 切片 history[-19:] 本身就是一个新 list，可以放心 pop。
+
+      ③ 裁完之后，新开头可能是 role == "tool"
+         —— 说明它的配对 assistant(带 tool_calls) 已经被裁掉了，这叫「孤儿」。
+            发给 API 直接 400：
+            Messages with role 'tool' must be a response to a
+            preceding message with 'tool_calls'
+
+    走②分支时，结果长度应该是 1 + (keep - 1) 条。
+
+    ── 自检（Git Bash，项目根目录）──
+        uv run python _selftest_trim.py
+        7 项全过才算对。
+    """
+    # 🔴 在这里写，8 行以内  ↓
+    if len(history) <= keep:
+        return history.copy()  # ① 没超 keep，返回拷贝
+    tail = history[-(keep - 1) :]
+    while tail and tail[0]["role"] == "tool":
+        tail.pop(0)
+    return history[:1] + tail  # 返回 system + 截断后的 tail
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Agent 循环（Part E 已完成，F 只改两行）
+# ══════════════════════════════════════════════════════════════════
+
+# ── F-2 · 改签名 ──────────────────────────────────────────────────
+# 🔴 这一行现在收的是「一个问题」。改成收「整个会话历史」：
+#
+#      旧：def run_agent(question: str, max_turns: int = 5) -> str:
+#      新：def run_agent(history: list[dict], max_turns: int = 5) -> str:
+#
+#    为什么：main() 每次会先把你这句话 append 进 history，再整段传进来。
+#    run_agent 不再负责「开启一段对话」，只负责「接着问下去」。
+# ─────────────────────────────────────────────────────────────────
+
+
+def run_agent(history: list[dict], max_turns: int = 5) -> str:
+    """反复问模型，直到它不再要工具为止。返回它最后说的那段话。"""
+    # ── F-2 续 · 改这一行 ─────────────────────────────────────────
+    # 🔴 现在这行是「凭空造一个只有一句话的 messages」。
+    #    改成「拿会话历史，先截断，再用」—— 想想调哪个函数、传什么。
+    #
+    #    前提（方案 A）：trim 返回的是新 list，所以下面那些 messages.append
+    #    （工具消息）不会污染 history。
+    # ──────────────────────────────────────────────────────────────
+    messages = trim(history)
     for turn in range(1, max_turns + 1):
         stream = client.chat.completions.create(
             model="deepseek-flash",
@@ -281,13 +365,78 @@ def run_agent(question: str, max_turns: int = 5) -> str:
     return f"（超过最大轮数 {max_turns}，停手）"
 
 
+# ══════════════════════════════════════════════════════════════════
+#  F-5 · 入口 —— 🔴 整段重写
+#  （下面是 Part E 的写死版，先留着保证文件还能跑，你写完就删掉）
+# ══════════════════════════════════════════════════════════════════
+#
+#  目标 = 一个 while 循环 + 两种模式。把这张表当需求文档来写：
+#
+#   场景    触发                行为                    退出码
+#   ──────────────────────────────────────────────────────────────
+#   交互    无参数              提示符 "你 > "            0
+#   单问    有参数              问一次就退                0
+#   退出    /exit 或 /quit      干净退出                  0
+#   清空    /clear              只保留 system             —
+#   空输入  回车 / 全空格       不调模型，重新提示        —
+#   EOF     Ctrl+D              干净退出，无 traceback    0
+#   中断    Ctrl+C              干净退出，无 traceback    130
+#   出错    API 抛异常          中文提示                  1
+#
+#  【这些不用自己想】
+#    · sys 已经帮你 import 了
+#    · argv：sys.argv[1:]，多个词用 " ".join(...) 拼回来
+#    · 退出码：raise SystemExit(码)；0 的话直接 return 也行
+#    · Ctrl+D → input() 抛 EOFError；Ctrl+C → 抛 KeyboardInterrupt
+#      两个都得 try/except 接住，否则甩一屏 traceback
+#    · 每轮顺序：history.append(user) → run_agent(history) → history.append(assistant)
+#
+#  【两个容易忘的】
+#    · run_agent 已经在流式打答案了，别再 print 一遍
+#    · 空输入别发给模型（花钱 + 没意义）
+#
+#  验收：任务卡 ①~⑩
+# ══════════════════════════════════════════════════════════════════
 def main() -> None:
-    # 这题必须真读文件才能答对 —— 模型不可能猜出 7319
-    question = "读一下 notes/demo.md，告诉我实验编号是多少。"
+    """F-5 · 入口。"""
+    history = [{"role": "system", "content": load_prompt()}]
 
-    print(f"你 > {question}\n")
-    answer = run_agent(question)
-    print(f"\n{'─' * 56}\n🎯 run_agent 返回：{answer}")
+    if sys.argv[1:]:
+        question = " ".join(sys.argv[1:])
+        history.append({"role": "user", "content": question})
+        try:
+            run_agent(history)
+        except OpenAIError as e:
+            print(f"\n调用失败:{e}")
+            raise SystemExit(1)
+        return
+
+    print("输入 /exit 退出，/clear 清空对话\n")
+    while True:
+        try:
+            user_input = input("你 > ").strip()
+            if not user_input:
+                continue
+            if user_input in ("/exit", "/quit"):
+                break
+            if user_input == "/clear":
+                history = [{"role": "system", "content": load_prompt()}]
+                print("会话已清空，只保留人设。")
+                continue
+
+            history.append({"role": "user", "content": user_input})
+            answer = run_agent(history)
+            history.append({"role": "assistant", "content": answer})
+
+        except EOFError:
+            print("\n退出（EOF）")
+            return
+        except KeyboardInterrupt:
+            print("\n退出（中断）")
+            raise SystemExit(130)
+        except OpenAIError as e:
+            print(f"\n调用失败：{e}")
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":
