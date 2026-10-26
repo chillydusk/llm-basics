@@ -113,6 +113,9 @@ uv run study-assistant ask "三次握手的序列号是怎么定的？"
 > 用镜像：`UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple uv sync`
 > （只在当前命令生效，不会改你的全局配置）
 
+> 🧰 **VS Code 满屏红线？** 先看 [docs/VS Code 常见问题.md](docs/VS%20Code%20常见问题.md)。
+> 判断标准只有一条：**命令行能跑 = 代码没问题，是 IDE 选错了解释器。**
+
 ### 命令行
 
 | 命令 | 作用 |

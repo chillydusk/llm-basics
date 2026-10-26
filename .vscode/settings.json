@@ -1,0 +1,27 @@
+{
+  // 解释器：用项目自己的 .venv（换机器/换目录后如果报"未安装包"，先看这条）
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
+
+  // 测试
+  "python.testing.pytestEnabled": true,
+  "python.testing.pytestArgs": ["tests"],
+
+  // src 布局：让 Pylance 找得到源码（不改变运行时，运行时靠可编辑安装）
+  "python.analysis.extraPaths": ["./src"],
+
+  // ruff 用项目环境里的那个，别让它自己下一个（版本不一致会导致两边结论不同）
+  "ruff.importStrategy": "fromEnvironment",
+  "ruff.configurationPreference": "filesystemFirst",
+
+  // 编码
+  "files.encoding": "utf8",
+  "files.autoGuessEncoding": true,
+
+  // 终端默认在项目根
+  "terminal.integrated.cwd": "${workspaceFolder}",
+
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnSave": false
+  }
+}
